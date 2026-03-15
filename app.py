@@ -2,6 +2,10 @@ import streamlit as st
 import pandas as pd
 from datetime import datetime, time, timedelta
 import calendar
+import pytz
+
+# --- 设置中国时区 ---
+china_tz = pytz.timezone('Asia/Shanghai')
 
 # --- 1. 页面配置 ---
 st.set_page_config(page_title="客服月度智能排班系统", layout="wide", page_icon="🗓️")
@@ -102,7 +106,7 @@ for d in all_dates:
         current_week = []
 
 # B. 实时监控 (仅在今天属于该月时展示)
-now = datetime.now()
+now = datetime.now(china_tz)
 if now.year == target_year and now.month == target_month:
     st.subheader(f"⏱️ 实时监控 ({now.strftime('%H:%M:%S')})")
     cols = st.columns(6)
