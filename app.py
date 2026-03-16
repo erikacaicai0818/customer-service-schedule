@@ -1,203 +1,192 @@
 import streamlit as st
 import pandas as pd
 from datetime import datetime, time, timedelta
-import calendar
 import os
+import pytz
+import calendar
 
-# --- 1. 基础配置 ---
-st.set_page_config(page_title="客服值班综合管理系统 V4.0", layout="wide")
-START_STATS_DATE = datetime(2026, 3, 1).date()
-DATA_FILE = "duty_records_v4.csv"
+# --- 1. 时区与基础配置 ---
+china_tz = pytz.timezone('Asia/Shanghai')
 
-# 班次定义
-SHIFTS = {
-    "早班": {"off": 8.5, "home": 0, "s": time(9,0), "e": time(19,0), "b": (time(11,30), time(13,0))},
-    "延迟班": {"off": 8.5, "home": 0, "s": time(10,0), "e": time(20,0), "b": (time(13,0), time(14,30))},
-    "晚值班": {"off": 8.5, "home": 2, "s": time(9,0), "e": time(22,0), "b": (time(11,30), time(13,0)), "h": (time(20,0), time(22,0)), "c": (time(19,0), time(20,0))},
-    "休息": {"off": 0, "home": 0, "s": time(0,0), "e": time(0,0), "b": None}
-}
+def get_now():
+    return datetime.now(china_tz)
 
-# 绝对公平周循环模板
-# 保证：每人每周休1天，且晚班次数分配均衡
-WEEK_PATTERN = {
-    "姓名": ["郭战勇", "徐远远", "陈鹤舞", "都 娟", "陈君琳", "顾凌海"],
-    0: ["延迟班", "早班", "晚值班", "早班", "早班", "早班"], # 周一
-    1: ["早班", "延迟班", "延迟班", "晚值班", "早班", "早班"], # 周二
-    2: ["休息", "早班", "早班", "延迟班", "晚值班", "早班"],    # 周三 (战勇休)
-    3: ["早班", "早班", "早班", "早班", "延迟班", "晚值班"],    # 周四
-    4: ["晚值班", "早班", "早班", "早班", "早班", "延迟班"],    # 周五
-    5: ["延迟班", "休息", "早班", "早班", "早班", "早班"],    # 周六 (远远休)
-    6: ["晚值班", "晚值班", "休息", "休息", "休息", "休息"]     # 周日 (其余休)
-}
+st.set_page_config(page_title="客服部公平排班管理系统", layout="wide")
 
-# --- 2. 数据处理函数 ---
+# 核心常量
+START_DATE = datetime(2026, 3, 1).date()
+STAFF = ["郭战勇", "徐远远", "陈鹤舞", "都 娟", "陈君琳", "顾凌海"]
+DB_FILE = "duty_records_final.csv"
+
+# 统一所有工时为 8.5 小时 (实际在岗/远程时长之和)
+FIXED_WORK_HOUR = 8.5 
+
+# --- 2. 数据持久化 ---
+if not os.path.exists(DB_FILE):
+    pd.DataFrame(columns=["id", "name", "type", "date", "start_t", "end_t", "hours", "status"]).to_csv(DB_FILE, index=False)
+
 def load_data():
-    if os.path.exists(DATA_FILE):
-        df = pd.read_csv(DATA_FILE)
-        df['日期'] = pd.to_datetime(df['日期']).dt.date
-        return df
-    return pd.DataFrame(columns=["ID", "姓名", "类型", "日期", "开始", "结束", "时数", "状态"])
+    df = pd.read_csv(DB_FILE)
+    df['date'] = pd.to_datetime(df['date']).dt.date
+    return df
 
-def save_record(name, r_type, r_date, s_time, e_time):
-    df = load_data()
-    r_id = int(df['ID'].max() + 1) if not df.empty else 1
-    dur = (datetime.combine(r_date, e_time) - datetime.combine(r_date, s_time)).seconds / 3600
-    new_rec = pd.DataFrame([[r_id, name, r_type, r_date, s_time.strftime("%H:%M"), e_time.strftime("%H:%M"), round(dur, 1), "有效"]], columns=df.columns)
-    pd.concat([df, new_rec]).to_csv(DATA_FILE, index=False)
+# --- 3. 核心算法：绝对公平循环排班 ---
 
-def revoke_record(r_id):
-    df = load_data()
-    df.loc[df['ID'] == r_id, '状态'] = "已撤回"
-    df.to_csv(DATA_FILE, index=False)
-
-# 获取某人某天的排班及实时状态
-def get_detail(name, d_date, check_time=None):
-    weekday = d_date.weekday()
-    idx = WEEK_PATTERN["姓名"].index(name)
-    s_name = WEEK_PATTERN[weekday][idx]
-    s_conf = SHIFTS[s_name]
+def get_duty_type(name, date_obj):
+    """
+    通过确定性算法，确保 6 个人在任何月份的工时完全一致。
+    逻辑：每个人在 6 天的循环中，必然有 1 天休息，5 天上班。
+    """
+    days_diff = (date_obj - START_DATE).days
+    name_idx = STAFF.index(name)
     
-    # 基础工时
-    off_h, home_h = s_conf["off"], s_conf["home"]
+    # 建立一个 6 天一循环的排班矩阵 (确保每天有 5 人上班，1 人休息)
+    # 矩阵值：0=休息, 1=早班, 2=延迟班, 3=晚班
+    # 周日特殊处理：仅 2 人上班
+    weekday = date_obj.weekday()
     
-    # 检查请假/调休
-    leaves = load_data()
-    day_leave = leaves[(leaves['姓名'] == name) & (leaves['日期'] == d_date) & (leaves['状态'] == "有效")]
-    leave_h = day_leave['时数'].sum()
-    
-    status = "🟢 正常值班"
-    if s_name == "休息": status = "🔴 休息日"
-    
-    # 实时状态判定
-    if check_time:
-        # 1. 检查是否在请假时间段内
-        for _, r in day_leave.iterrows():
-            if datetime.strptime(r['开始'], "%H:%M").time() <= check_time <= datetime.strptime(r['结束'], "%H:%M").time():
-                status = f"🟡 {r['类型']}中"
+    if weekday == 6:  # 周日
+        # 每 3 周一个循环，让大家轮流值周日
+        cycle_week = (days_diff // 7) % 3
+        pairs = [(0, 1), (2, 3), (4, 5)] # 郭&徐, 陈&都, 陈&顾
+        sun_pair_indices = pairs[cycle_week]
         
-        # 2. 检查休息/居家/通勤
-        if status == "🟢 正常值班":
-            if s_conf["b"] and s_conf["b"][0] <= check_time <= s_conf["b"][1]:
-                status = "☕ 午休中"
-            elif s_name == "晚值班":
-                if s_conf["c"][0] <= check_time <= s_conf["c"][1]: status = "🚗 通勤中"
-                elif s_conf["h"][0] <= check_time <= s_conf["h"][1]: status = "🏠 居家值班"
-            if not (s_conf["s"] <= check_time <= s_conf["e"]):
-                if status == "🟢 正常值班": status = "🌙 已下班"
-
-    return {"shift": s_name, "off_h": off_h, "home_h": home_h, "leave_h": leave_h, "status": status, "break": s_conf["b"]}
-
-# --- 3. UI 渲染 ---
-st.title("🎧 客服值班综合管理系统 V4.0")
-
-# 侧边栏
-st.sidebar.header("📅 时间筛选")
-sel_date = st.sidebar.date_input("查看日期", datetime.now().date())
-sel_month = sel_date.month
-sel_year = sel_date.year
-
-st.sidebar.divider()
-st.sidebar.header("📝 申请录入")
-with st.sidebar.form("apply_form", clear_on_submit=True):
-    a_name = st.selectbox("申请人", WEEK_PATTERN["姓名"])
-    a_type = st.radio("类型", ["请假", "调休"])
-    a_date = st.date_input("日期", sel_date)
-    a_s = st.time_input("开始", time(9, 0))
-    a_e = st.time_input("结束", time(18, 0))
-    if st.form_submit_button("提交申请"):
-        save_record(a_name, a_type, a_date, a_s, a_e)
-        st.rerun()
-
-# --- Tab 分页 ---
-tab1, tab2, tab3, tab4 = st.tabs(["🕒 实时状态", "📅 周排班表", "📊 工时统计", "📜 历史记录"])
-
-# Tab 1: 实时状态
-with tab1:
-    now = datetime.now()
-    st.subheader(f"当前在岗监控 ({now.strftime('%H:%M:%S')})")
-    cols = st.columns(6)
-    for i, name in enumerate(WEEK_PATTERN["姓名"]):
-        res = get_detail(name, now.date(), now.time())
-        with cols[i]:
-            if "🟢" in res['status']: st.success(f"**{name}**\n\n{res['status']}")
-            elif "☕" in res['status'] or "🚗" in res['status']: st.info(f"**{name}**\n\n{res['status']}")
-            elif "🏠" in res['status']: st.warning(f"**{name}**\n\n{res['status']}")
-            elif "🟡" in res['status']: st.info(f"**{name}**\n\n{res['status']}")
-            else: st.error(f"**{name}**\n\n{res['status']}")
-            st.caption(f"今日班次: {res['shift']}")
-
-# Tab 2: 周排班表
-with tab2:
-    start_w = sel_date - timedelta(days=sel_date.weekday())
-    st.subheader(f"周排班视图 ({start_w} ~ {start_w + timedelta(days=6)})")
-    week_data = []
-    for name in WEEK_PATTERN["姓名"]:
-        row = {"姓名": name}
-        total_w_h = 0
-        for i in range(7):
-            d = start_w + timedelta(days=i)
-            info = get_detail(name, d)
-            day_str = d.strftime('%m-%d')
-            row[day_str] = f"{info['shift']}"
-            if info['leave_h'] > 0: row[day_str] += f" (假-{info['leave_h']}h)"
-            total_w_h += (info['off_h'] + info['home_h'] - info['leave_h'])
-        row["周工时"] = total_w_h
-        week_data.append(row)
-    st.dataframe(pd.DataFrame(week_data), use_container_width=True)
-
-# Tab 3: 工时统计
-with tab3:
-    st.subheader(f"工时统计汇总 (起止: 2026-03-01 至 {sel_year}-{sel_month}月底)")
-    month_days = calendar.monthrange(sel_year, sel_month)[1]
-    m_stats = []
-    for name in WEEK_PATTERN["姓名"]:
-        # 月度统计
-        m_off, m_home, m_leave = 0, 0, 0
-        for d in range(1, month_days + 1):
-            d_obj = datetime(sel_year, sel_month, d).date()
-            if d_obj < START_STATS_DATE: continue
-            info = get_detail(name, d_obj)
-            m_off += info['off_h']
-            m_home += info['home_h']
-            m_leave += info['leave_h']
-        
-        # 历史累计统计 (自2026-03-01起所有数据)
-        h_total = 0
-        curr_d = START_STATS_DATE
-        while curr_d <= datetime.now().date():
-            h_info = get_detail(name, curr_d)
-            h_total += (h_info['off_h'] + h_info['home_h'] - h_info['leave_h'])
-            curr_d += timedelta(days=1)
-
-        m_stats.append({
-            "姓名": name,
-            "本月在司(h)": m_off,
-            "本月居家(h)": m_home,
-            "本月请假(h)": m_leave,
-            "本月总计": m_off + m_home - m_leave,
-            "自2026-03-01累计": h_total
-        })
-    st.table(pd.DataFrame(m_stats))
-
-# Tab 4: 历史记录
-with tab4:
-    st.subheader("申请流水与撤回管理")
-    history = load_data().sort_values("ID", ascending=False)
-    if history.empty:
-        st.write("暂无记录")
+        if name_idx == sun_pair_indices[0]: return "周日早班"
+        if name_idx == sun_pair_indices[1]: return "周日晚班"
+        return "休息"
     else:
-        for _, r in history.iterrows():
-            c1, c2, c3, c4 = st.columns([1, 3, 1, 1])
-            with c1: st.write(f"ID: {r['ID']}")
-            with c2: st.write(f"**{r['日期']} {r['姓名']}** | {r['类型']} ({r['开始']}-{r['结束']}) | {r['时数']}h")
-            with c3:
-                color = "green" if r['状态'] == "有效" else "gray"
-                st.markdown(f":{color}[{r['状态']}]")
-            with c4:
-                if r['状态'] == "有效":
-                    if st.button("撤回", key=f"rev_{r['ID']}"):
-                        revoke_record(r['ID'])
-                        st.rerun()
+        # 周一至周六：保证每天 1 人休息，其余 5 人上班
+        # 休息位随日期轮转：第1天索引0休，第2天索引1休...
+        off_idx = (days_diff - (days_diff // 7)) % 6
+        if name_idx == off_idx:
+            return "休息"
+        
+        # 晚班分配：每天 2 人晚班
+        night_idx_1 = (days_diff) % 6
+        night_idx_2 = (days_diff + 1) % 6
+        if name_idx == night_idx_1 or name_idx == night_idx_2:
+            return "晚值班"
+        
+        # 延迟班分配（前一天是晚班的人）
+        yesterday_diff = days_diff - 1
+        y_night_idx_1 = (yesterday_diff) % 6
+        y_night_idx_2 = (yesterday_diff + 1) % 6
+        if name_idx == y_night_idx_1 or name_idx == y_night_idx_2:
+            return "延迟班"
+            
+        return "早班"
 
+def get_current_status(name, name_idx, duty_type, now_dt):
+    now_t = now_dt.time()
+    now_d = now_dt.date()
+    
+    # 检查请假
+    recs = load_data()
+    active = recs[(recs['name']==name) & (recs['date']==now_d) & (recs['status']=="有效")]
+    for _, r in active.iterrows():
+        st_t = datetime.strptime(r['start_t'], "%H:%M:%S").time()
+        en_t = datetime.strptime(r['end_t'], "%H:%M:%S").time()
+        if st_t <= now_t <= en_t: return f"🔴 {r['type']}中", "red"
+
+    if duty_type == "休息": return "😴 休息中", "grey"
+    
+    # 午休逻辑
+    lunch = (time(11,30), time(13,0)) if name_idx % 2 == 0 else (time(13,0), time(14,30))
+    if lunch[0] <= now_t <= lunch[1]: return "🍱 午休中", "orange"
+    
+    # 班次判定
+    if "晚值班" in duty_type or "周日晚班" in duty_type:
+        if time(9,0) <= now_t <= time(19,0): return "🏢 在司值班", "green"
+        if time(19,0) <= now_t <= time(20,0): return "🚗 通勤/待机", "blue"
+        if time(20,0) <= now_t <= time(22,0): return "🏠 居家值班", "green"
+    elif duty_type == "延迟班":
+        if time(10,0) <= now_t <= time(20,0): return "🏢 在司值班", "green"
+    else: # 早班
+        if time(9,0) <= now_t <= time(19,0): return "🏢 在司值班", "green"
+        
+    return "🌙 已下班", "red"
+
+# --- 4. 界面展示 ---
+
+st.title("⚖️ 客服部公平排班管理系统 (工时对齐版)")
+now = get_now()
+st.subheader(f"⏱️ 当前时间：{now.strftime('%Y-%m-%d %H:%M:%S')} (北京时间)")
+
+# A. 实时状态
+cols = st.columns(6)
+for i, name in enumerate(STAFF):
+    duty = get_duty_type(name, now.date())
+    state_text, color = get_current_status(name, i, duty, now)
+    with cols[i]:
+        st.metric(label=name, value=duty)
+        if color == "green": st.success(state_text)
+        elif color == "orange": st.warning(state_text)
+        elif color == "blue": st.info(state_text)
+        else: st.error(state_text)
+
+# B. 申请录入与回撤
 st.divider()
-st.caption("提示：晚值班人员次日自动执行10:00上岗班次（延迟班）。")
+col_req, col_his = st.columns([1, 2])
+with col_req:
+    st.subheader("📝 申请录入")
+    with st.form("f1", clear_on_submit=True):
+        u_name = st.selectbox("人员", STAFF)
+        u_type = st.radio("类型", ["请假", "调休"], horizontal=True)
+        u_date = st.date_input("日期", value=now.date())
+        u_t1 = st.time_input("开始", value=time(9,0))
+        u_t2 = st.time_input("结束", value=time(18,0))
+        if st.form_submit_button("确认提交"):
+            df = load_data()
+            h = round((datetime.combine(u_date, u_t2) - datetime.combine(u_date, u_t1)).total_seconds()/3600, 1)
+            new_id = int(df['id'].max()+1) if not df.empty else 1
+            new_row = pd.DataFrame([[new_id, u_name, u_type, u_date, u_t1, u_t2, h, "有效"]], columns=df.columns)
+            pd.concat([df, new_row]).to_csv(DB_FILE, index=False)
+            st.success("已更新数据")
+
+with col_his:
+    st.subheader("⏳ 历史记录与撤回")
+    raw_df = load_data().sort_values("id", ascending=False).head(5)
+    for _, r in raw_df.iterrows():
+        c1, c2 = st.columns([4, 1])
+        c1.write(f"{r['name']} | {r['date']} | {r['type']} {r['hours']}h | {r['status']}")
+        if r['status'] == "有效" and c2.button("撤回", key=f"rev_{r['id']}"):
+            all_df = load_data()
+            all_df.loc[all_df['id']==r['id'], 'status'] = "已撤回"
+            all_df.to_csv(DB_FILE, index=False)
+            st.rerun()
+
+# C. 月度工时统计 (绝对公平展示)
+st.divider()
+st.subheader("📊 月度统计 (从2026-03-01起)")
+s_year = st.sidebar.selectbox("年份", [2026, 2027], index=0)
+s_month = st.sidebar.selectbox("月份", range(1, 13), index=now.month-1)
+_, d_count = calendar.monthrange(s_year, s_month)
+m_dates = [datetime(s_year, s_month, d).date() for d in range(1, d_count+1)]
+db = load_data()
+db = db[db['status']=="有效"]
+
+m_summary = []
+for name in STAFF:
+    # 只有在统计起点之后的日期才计入
+    days = [d for d in m_dates if d >= START_DATE]
+    # 统计班次数量
+    work_days_count = sum([1 for d in days if get_duty_type(name, d) != "休息"])
+    scheduled_h = work_days_count * FIXED_WORK_HOUR
+    # 扣除请假
+    deduction = db[(db['name']==name) & (pd.to_datetime(db['date']).dt.month==s_month) & (pd.to_datetime(db['date']).dt.year==s_year)]['hours'].sum()
+    m_summary.append({"姓名": name, "出勤天数": work_days_count, "总计工时": scheduled_h - deduction})
+
+st.table(pd.DataFrame(m_summary))
+
+# D. 值班表预览
+st.subheader("🗓️ 值班预览")
+mon = now.date() - timedelta(days=now.weekday())
+w_days = [mon + timedelta(days=i) for i in range(7)]
+w_df = pd.DataFrame(columns=["人员"] + [d.strftime("%m-%d\n%a") for d in w_days])
+w_df["人员"] = STAFF
+for i, d in enumerate(w_days):
+    for idx, name in enumerate(STAFF):
+        t = get_duty_type(name, d)
+        if not db[(db['name']==name) & (db['date']==d)].empty: t += "(假)"
+        w_df.iloc[idx, i+1] = t
+st.dataframe(w_df, use_container_width=True, hide_index=True)
