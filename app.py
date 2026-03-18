@@ -10,12 +10,12 @@ import os
 china_tz = pytz.timezone('Asia/Shanghai')
 
 def get_now():
-    """获取北京时间，并立即转为字符串防止序列化错误"""
+    """获取北京时间"""
     return datetime.now(china_tz)
 
-st.set_page_config(page_title="客服考勤系统 v17.2", layout="wide", page_icon="⚖️")
+st.set_page_config(page_title="客服考勤系统 v18.0", layout="wide", page_icon="⚖️")
 
-# 界面风格锁定：日历底色美化
+# 界面风格锁定
 st.markdown("""
     <style>
     .stApp { background-color: #FFFFFF; color: #31333F; }
@@ -29,6 +29,8 @@ st.markdown("""
         box-shadow: 2px 2px 5px rgba(0,0,0,0.03);
     }
     .calendar-today { background-color: #FFF9DB; border: 1px solid #FFE066; }
+    /* 让表格更紧凑清晰 */
+    .stDataFrame { border: 1px solid #f0f2f6; border-radius: 5px; }
     </style>
     """, unsafe_allow_html=True)
 
@@ -46,67 +48,45 @@ LUNCH_CONFIG = {
     5: {"group": "B组", "start": time(13, 0), "end": time(14, 30)},
 }
 
-# --- 2. 数据库逻辑：【彻底修复版】 ---
-
+# --- 2. 数据库逻辑 (Google Sheets) ---
 conn = st.connection("gsheets", type=GSheetsConnection)
 
 def load_db():
     try:
-        # 获取最新数据
         data = conn.read(ttl=0)
         df = data.dropna(how="all")
-        # 转换日期用于逻辑判断
         df['date'] = pd.to_datetime(df['date']).dt.date
         return df
     except Exception:
-        # 如果表不存在或报错，返回空结构
         return pd.DataFrame(columns=["id", "name", "type", "date", "start_t", "end_t", "hours", "reason", "status", "submit_time"])
 
 def save_data_to_gsheets(new_row_dict):
-    """
-    【终极修复】强制将所有列转为字符串，确保 GSheets API 不会报错
-    """
     df = load_db()
-    
-    # 1. 对新行进行极端格式化：全部转为字符串
+    # 强制格式化防止报错
     new_entry = {}
     for k, v in new_row_dict.items():
         if isinstance(v, (date, time, datetime)):
             new_entry[k] = v.strftime('%Y-%m-%d %H:%M:%S') if isinstance(v, datetime) else v.strftime('%Y-%m-%d') if isinstance(v, date) else v.strftime('%H:%M:%S')
         else:
             new_entry[k] = str(v)
-
     new_row_df = pd.DataFrame([new_entry])
-    
-    # 2. 合并
     updated_df = pd.concat([df, new_row_df], ignore_index=True)
-    
-    # 3. 【核心修复步】在上传前，将所有非数值列强制转为字符串并清理异常值
+    # 上传前清理
     for col in updated_df.columns:
-        if col == 'hours':
-            updated_df[col] = pd.to_numeric(updated_df[col], errors='coerce').fillna(0.0)
-        elif col == 'id':
-            updated_df[col] = pd.to_numeric(updated_df[col], errors='coerce').fillna(0).astype(int)
-        else:
-            # 这里的 astype(str) 非常重要，它确保了没有任何 Timestamp 对象残留
-            updated_df[col] = updated_df[col].astype(str).replace(['nan', 'None', '<NA>', 'NaT'], '')
-
-    # 4. 执行云端保存
+        if col == 'hours': updated_df[col] = pd.to_numeric(updated_df[col], errors='coerce').fillna(0.0)
+        elif col == 'id': updated_df[col] = pd.to_numeric(updated_df[col], errors='coerce').fillna(0).astype(int)
+        else: updated_df[col] = updated_df[col].astype(str).replace(['nan', 'None', '<NA>', 'NaT'], '')
     conn.update(data=updated_df)
 
 def withdraw_req(req_id):
-    """回撤功能也必须经过字符串清理"""
     df = load_db()
     df.loc[df['id'].astype(str) == str(req_id), 'status'] = "已撤回"
-    
-    # 清理所有列转为字符串
     for col in df.columns:
         if col not in ['hours', 'id']:
             df[col] = df[col].astype(str).replace(['nan', 'None', '<NA>', 'NaT'], '')
     conn.update(data=df)
 
 # --- 3. 排班算法 ---
-
 def is_original_working(name, date_obj):
     weekday = date_obj.weekday()
     if name == "郭战勇" and weekday == 2: return False
@@ -144,27 +124,21 @@ def get_final_duty(name, date_obj, db_df):
         if name == target: return get_original_duty(applicant, date_obj)
     return orig
 
-# --- 4. 实时监控状态 ---
-
+# --- 4. 实时状态判定 ---
 def get_status_ui(name, name_idx, final_dtype, now_dt, db_df):
     now_t, now_d = now_dt.time(), now_dt.date()
     if not db_df.empty:
         active = db_df[(db_df['name']==name) & (db_df['date']==now_d) & (db_df['status']=="有效") & (db_df['type'] != "换班")]
         for _, r in active.iterrows():
             try:
-                # 处理可能从表格读出来的不同格式的时间字符串
-                st_t_str = str(r['start_t'])[:8]
-                en_t_str = str(r['end_t'])[:8]
-                st_t = datetime.strptime(st_t_str, "%H:%M:%S").time()
-                en_t = datetime.strptime(en_t_str, "%H:%M:%S").time()
+                st_t = datetime.strptime(str(r['start_t'])[:8], "%H:%M:%S").time()
+                en_t = datetime.strptime(str(r['end_t'])[:8], "%H:%M:%S").time()
                 if st_t <= now_t <= en_t: return f"🔴 {r['type']}中", "red"
             except: continue
-
     if final_dtype in ["休息", "未开始"]: return "😴 休息中", "grey"
     if final_dtype != "晚值班":
         l_range = (time(12,45), time(14,15)) if now_d.weekday()==6 else (LUNCH_CONFIG[name_idx]['start'], LUNCH_CONFIG[name_idx]['end'])
         if l_range[0] <= now_t <= l_range[1]: return f"🍱 午休中", "orange"
-
     if final_dtype == "晚值班":
         if now_t < time(12, 30): return "⏳ 等待上班", "grey"
         if time(12, 30) <= now_t <= time(19, 0): return "🏢 在司值班", "green"
@@ -177,15 +151,13 @@ def get_status_ui(name, name_idx, final_dtype, now_dt, db_df):
     return "🌙 已下班", "red"
 
 # --- 5. 页面布局 ---
-
 now_beijing = get_now()
 db_full = load_db()
 
-st.title("🛡️ 客服部全功能智能管理系统 v17.2")
+st.title("🛡️ 客服部考勤计薪系统 v18.0")
 
-# 侧边栏
 with st.sidebar:
-    st.header("📋 请假/调休申请")
+    st.header("📋 行政申请")
     with st.form("leave_form", clear_on_submit=True):
         l_name = st.selectbox("人员姓名", STAFF, key="ln")
         l_type = st.radio("类型", ["事假", "病假", "调休"], horizontal=True)
@@ -194,34 +166,23 @@ with st.sidebar:
         l_t1 = c1.time_input("开始", value=time(9,0))
         l_t2 = c2.time_input("结束", value=time(18,0))
         l_reason = st.text_input("具体事由")
-        if st.form_submit_button("提交行政申请"):
+        if st.form_submit_button("提交"):
             h = round((datetime.combine(l_date, l_t2) - datetime.combine(l_date, l_t1)).total_seconds()/3600, 1)
             new_id = int(db_full['id'].max()+1) if not db_full.empty else 1001
-            save_data_to_gsheets({
-                "id": new_id, "name": l_name, "type": l_type, "date": l_date,
-                "start_t": l_t1, "end_t": l_t2,
-                "hours": h, "reason": l_reason, "status": "有效", "submit_time": now_beijing
-            })
-            st.success("请假申请已发送")
+            save_data_to_gsheets({"id": new_id, "name": l_name, "type": l_type, "date": l_date, "start_t": l_t1, "end_t": l_t2, "hours": h, "reason": l_reason, "status": "有效", "submit_time": now_beijing})
+            st.success("已发送")
             st.rerun()
-
-    st.divider()
-    st.header("🔄 全天换班申请")
+    st.header("🔄 换班申请")
     with st.form("swap_form", clear_on_submit=True):
-        s_name = st.selectbox("申请人 (我)", STAFF, key="sn")
-        target = st.selectbox("换班目标人 (对方)", [s for s in STAFF if s != s_name])
+        s_name = st.selectbox("申请人", STAFF, key="sn")
+        target = st.selectbox("目标人", [s for s in STAFF if s != s_name])
         s_date = st.date_input("换班日期", value=now_beijing.date())
-        if st.form_submit_button("提交全天换班"):
+        if st.form_submit_button("确认全天换班"):
             new_id = int(db_full['id'].max()+1) if not db_full.empty else 1001
-            save_data_to_gsheets({
-                "id": new_id, "name": s_name, "type": "换班", "date": s_date,
-                "start_t": "00:00:00", "end_t": "23:59:59",
-                "hours": 0.0, "reason": f"与 {target} 换班", "status": "有效", "submit_time": now_beijing
-            })
-            st.success("换班请求已成功上传云端")
+            save_data_to_gsheets({"id": new_id, "name": s_name, "type": "换班", "date": s_date, "start_t": "00:00:00", "end_t": "23:59:59", "hours": 0.0, "reason": f"与 {target} 换班", "status": "有效", "submit_time": now_beijing})
+            st.success("已同步")
             st.rerun()
 
-# 选项卡
 tabs = st.tabs(["🟢 实时监控", "👤 个人月度表", "📅 周度全表", "💰 计薪汇总", "🔍 记录管理"])
 
 # Tab 1: 实时
@@ -241,7 +202,7 @@ with tabs[0]:
             elif clr == "red": st.error(txt)
             elif clr == "blue": st.info(txt)
             else: st.write(txt)
-    st.info(f"当前在位办公人数：`{on_duty}` 名")
+    st.info(f"当前在岗办公人数：`{on_duty}` 名")
 
 # Tab 2: 个人月度
 with tabs[1]:
@@ -250,15 +211,11 @@ with tabs[1]:
     t_staff = i_c1.selectbox("查看客服", STAFF, key="is_p")
     t_year = i_c2.selectbox("年份", [2026, 2027], key="iy_p")
     t_month = i_c3.selectbox("月份", range(1, 13), index=now_beijing.month-1, key="im_p")
-    
     cal = calendar.Calendar(firstweekday=0)
     weeks = cal.monthdatescalendar(t_year, t_month)
     db_v = db_full[db_full['status']=="有效"] if not db_full.empty else pd.DataFrame()
-    
     header_cols = st.columns(7)
-    for idx, d_n in enumerate(["一","二","三","四","五","六","日"]):
-        header_cols[idx].markdown(f"<center><b>周{d_n}</b></center>", unsafe_allow_html=True)
-    
+    for idx, d_n in enumerate(["一","二","三","四","五","六","日"]): header_cols[idx].markdown(f"<center><b>周{d_n}</b></center>", unsafe_allow_html=True)
     for week in weeks:
         cols = st.columns(7)
         for i, d in enumerate(week):
@@ -266,12 +223,7 @@ with tabs[1]:
                 f_dt = get_final_duty(t_staff, d, db_full)
                 is_today = "calendar-today" if d == now_beijing.date() else ""
                 with cols[i]:
-                    st.markdown(f"""
-                        <div class="calendar-cell {is_today}">
-                            <div style='font-size:1.1em; font-weight:bold;'>{d.day}</div>
-                            <div style='color:#004085; margin-top:5px; font-weight:bold;'>{'休' if f_dt=='休息' else f_dt}</div>
-                        </div>
-                    """, unsafe_allow_html=True)
+                    st.markdown(f"<div class='calendar-cell {is_today}'><div style='font-size:1.1em; font-weight:bold;'>{d.day}</div><div style='color:#004085; margin-top:5px; font-weight:bold;'>{'休' if f_dt=='休息' else f_dt}</div></div>", unsafe_allow_html=True)
                     if f_dt != "休息":
                         l_t = "12:45" if d.weekday()==6 else LUNCH_CONFIG[STAFF.index(t_staff)]['start'].strftime('%H:%M')
                         st.caption(f"🍱{l_t}")
@@ -282,18 +234,31 @@ with tabs[1]:
                                 st.markdown(f":{c}[{r['type']}]")
             else: cols[i].write("")
 
-# Tab 3: 周表
+# --- Tab 3: 周表 (新增统计工时) ---
 with tabs[2]:
+    st.subheader("📅 本周班次及工时汇总")
     mon = now_beijing.date() - timedelta(days=now_beijing.weekday())
     w_dates = [mon + timedelta(days=i) for i in range(7)]
     w_res = []
     db_v = db_full[db_full['status']=="有效"] if not db_full.empty else pd.DataFrame()
     for name in STAFF:
         row = {"姓名": name}
+        week_theoretical_h = 0.0
+        week_deduct_h = 0.0
         for d in w_dates:
             f_dt = get_final_duty(name, d, db_full)
-            l_h = db_v[(db_v['name']==name) & (db_v['date']==d) & (db_v['type']!="换班")]['hours'].sum() if not db_v.empty else 0
+            # 计算理论工时 (包含换班)
+            day_theoretical = FIXED_HOUR if f_dt != "休息" else 0.0
+            week_theoretical_h += day_theoretical
+            # 计算扣除工时 (仅事假)
+            day_l = db_v[(db_v['name']==name) & (db_v['date']==d) & (db_v['type']=="事假")]
+            l_h = round(day_l['hours'].sum(), 1)
+            week_deduct_h += l_h
+            
             row[d.strftime("%m-%d\n%a")] = f"{f_dt}" + (f"\n(假:{l_h}h)" if l_h > 0 else "")
+        
+        row["周理论工时"] = f"{round(week_theoretical_h, 1)}h"
+        row["周实到工时"] = f"{round(week_theoretical_h - week_deduct_h, 1)}h"
         w_res.append(row)
     st.dataframe(pd.DataFrame(w_res), use_container_width=True, hide_index=True)
 
@@ -305,30 +270,20 @@ with tabs[3]:
     _, d_cnt = calendar.monthrange(m_y, m_m)
     m_dates = [datetime(m_y, m_m, d).date() for d in range(1, d_cnt+1) if datetime(m_y, m_m, d).date() >= START_DATE]
     db_v = db_full[db_full['status']=="有效"] if not db_full.empty else pd.DataFrame()
-    
     m_summary = []
     for name in STAFF:
         actual_work_days = sum([1 for d in m_dates if get_final_duty(name, d, db_full) != "休息"])
         standard_h = round(actual_work_days * FIXED_HOUR, 1)
-        pers_h, paid_h = 0.0, 0.0
-        if not db_v.empty:
-            recs = db_v[(db_v['name']==name) & (pd.to_datetime(db_v['date']).dt.month==m_m) & (pd.to_datetime(db_v['date']).dt.year==m_y)]
-            pers_h = round(recs[recs['type'] == "事假"]['hours'].sum(), 1)
-            paid_h = round(recs[recs['type'].isin(["病假", "调休"])]['hours'].sum(), 1)
-        
-        final_h = round(max(0.0, standard_h - pers_h), 1)
-        m_summary.append({
-            "姓名": name, "实到天数": actual_work_days, "理论总工时": f"{standard_h}h",
-            "事假扣除": f"-{pers_h}h", "病假/调休(不扣)": f"{paid_h}h", "计薪总工时": f"{final_h}h"
-        })
+        pers_h = round(db_v[(db_v['name']==name) & (pd.to_datetime(db_v['date']).dt.month==m_m) & (pd.to_datetime(db_v['date']).dt.year==m_y) & (db_v['type']=="事假")]['hours'].sum(), 1)
+        paid_h = round(db_v[(db_v['name']==name) & (pd.to_datetime(db_v['date']).dt.month==m_m) & (pd.to_datetime(db_v['date']).dt.year==m_y) & (db_v['type'].isin(["病假", "调休"]))]['hours'].sum(), 1)
+        m_summary.append({"姓名": name, "实到天数": actual_work_days, "理论总工时": f"{standard_h}h", "事假扣除": f"-{pers_h}h", "病假/调休(不扣)": f"{paid_h}h", "计薪总工时": f"{round(max(0.0, standard_h - pers_h), 1)}h"})
     st.table(pd.DataFrame(m_summary))
 
 # Tab 5: 管理记录
 with tabs[4]:
-    st.subheader("🔍 流水管理 (支持一键撤回)")
-    f_m = st.selectbox("选择月份查询记录", range(1, 13), index=now_beijing.month-1, key="fm_s")
+    st.subheader("🔍 流水管理 (支持回撤)")
+    f_m = st.selectbox("选择月份查询", range(1, 13), index=now_beijing.month-1, key="fm_s")
     if not db_full.empty:
-        # 将日期转为 datetime 以便筛选
         df_show = db_full.copy()
         df_show['month'] = pd.to_datetime(df_show['date']).dt.month
         df_show = df_show[df_show['month'] == f_m].sort_values("date", ascending=False)
@@ -338,11 +293,8 @@ with tabs[4]:
             s_clr = "green" if row['status']=="有效" else "red"
             c2.markdown(f"**{row['name']}** | {row['date']} | {row['type']} | {row['reason']}")
             if str(row['status']) == "有效":
-                if c3.button("撤回", key=f"r_btn_{row['id']}"):
-                    withdraw_req(row['id'])
-                    st.rerun()
+                if c3.button("撤回", key=f"r_btn_{row['id']}"): withdraw_req(row['id']); st.rerun()
             st.divider()
     else: st.write("暂无记录")
 
-if st.button("🔄 同步云端数据"):
-    st.rerun()
+if st.button("🔄 同步数据"): st.rerun()
