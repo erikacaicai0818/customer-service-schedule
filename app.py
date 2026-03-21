@@ -12,7 +12,7 @@ china_tz = pytz.timezone('Asia/Shanghai')
 def get_now():
     return datetime.now(china_tz)
 
-st.set_page_config(page_title="客服考勤管理系统 v18.7", layout="wide", page_icon="⚖️")
+st.set_page_config(page_title="客服考勤管理系统 v18.8", layout="wide", page_icon="⚖️")
 
 # 界面风格锁定
 st.markdown("""
@@ -24,7 +24,7 @@ st.markdown("""
         border-radius: 8px;
         padding: 8px;
         margin-bottom: 5px;
-        min-height: 100px;
+        min-height: 110px;
         box-shadow: 2px 2px 5px rgba(0,0,0,0.03);
     }
     .calendar-today { background-color: #FFF9DB; border: 1px solid #FFE066; }
@@ -33,7 +33,7 @@ st.markdown("""
 
 # 核心常量
 START_DATE = datetime(2026, 3, 1).date()
-# 【关键更新】：根据要求调整了 陈鹤舞 与 都 娟 的排位顺序
+# 人员名单 (保持 v18.7 确定的顺序)
 STAFF = ["郭战勇", "徐远远", "陈君琳", "陈鹤舞", "都 娟", "顾凌海"]
 FIXED_HOUR = 8.5 
 
@@ -59,6 +59,7 @@ def save_data_to_gsheets(new_row_dict):
             new_entry[k] = str(v)
     new_row_df = pd.DataFrame([new_entry])
     updated_df = pd.concat([df, new_row_df], ignore_index=True)
+    # 强制清理数据类型
     for col in updated_df.columns:
         if col == 'hours': updated_df[col] = pd.to_numeric(updated_df[col], errors='coerce').fillna(0.0)
         elif col == 'id': updated_df[col] = pd.to_numeric(updated_df[col], errors='coerce').fillna(0).astype(int)
@@ -72,9 +73,11 @@ def withdraw_req(req_id):
         if col not in ['hours', 'id']:
             df[col] = df[col].astype(str).replace(['nan', 'None', '<NA>', 'NaT'], '')
     conn.update(data=df)
+    st.success(f"记录 ID:{req_id} 已成功撤回")
 
 # --- 3. 核心排班算法 ---
 def get_original_duty(name, date_obj):
+    """系统最原始的理论排班"""
     if date_obj < START_DATE: return "未开始"
     weekday = date_obj.weekday()
     days_diff = (date_obj - START_DATE).days
@@ -94,20 +97,21 @@ def get_original_duty(name, date_obj):
     rotated_staff = working_staff[shift_offset:] + working_staff[:shift_offset]
     current_staff_pos = rotated_staff.index(name)
 
-    if weekday in [0, 1, 3, 4]: # 2早, 2延, 2晚
+    if weekday in [0, 1, 3, 4]: 
         if current_staff_pos < 2: return "早班"
         elif current_staff_pos < 4: return "延迟班"
         else: return "晚值班"
-    elif weekday in [2, 5]: # 2早, 1延, 2晚
+    elif weekday in [2, 5]: 
         if current_staff_pos < 2: return "早班"
         elif current_staff_pos < 3: return "延迟班"
         else: return "晚值班"
-    elif weekday == 6: # 1早, 1晚
+    elif weekday == 6: 
         if current_staff_pos < 1: return "早班"
         else: return "晚值班"
     return "早班"
 
 def get_final_duty(name, date_obj, db_df):
+    """根据有效的换班记录，计算最终生效的班次"""
     orig = get_original_duty(name, date_obj)
     if db_df.empty: return orig
     swaps = db_df[(db_df['date'] == date_obj) & (db_df['type'] == "换班") & (db_df['status'] == "有效")]
@@ -148,10 +152,10 @@ def get_status_ui(name, name_idx, final_dtype, now_dt, db_df):
 now_beijing = get_now()
 db_full = load_db()
 
-st.title("🛡️ 客服部智能化管理系统 v18.7")
+st.title("🛡️ 客服部智能化管理系统 v18.8")
 
 with st.sidebar:
-    st.header("📋 行政与换班申请")
+    st.header("📋 行政申请")
     with st.form("leave_form", clear_on_submit=True):
         l_name = st.selectbox("人员姓名", STAFF, key="ln")
         l_type = st.radio("类型", ["事假", "病假", "调休"], horizontal=True)
@@ -160,17 +164,18 @@ with st.sidebar:
         l_t1 = c1.time_input("开始", value=time(9,0))
         l_t2 = c2.time_input("结束", value=time(18,0))
         l_reason = st.text_input("备注信息")
-        if st.form_submit_button("提交考勤申请"):
+        if st.form_submit_button("提交行政申请"):
             h = round((datetime.combine(l_date, l_t2) - datetime.combine(l_date, l_t1)).total_seconds()/3600, 1)
             new_id = int(db_full['id'].max()+1) if not db_full.empty else 1001
             save_data_to_gsheets({"id": new_id, "name": l_name, "type": l_type, "date": l_date, "start_t": l_t1, "end_t": l_t2, "hours": h, "reason": l_reason, "status": "有效", "submit_time": now_beijing})
             st.rerun()
     
+    st.header("🔄 换班申请")
     with st.form("swap_form", clear_on_submit=True):
-        s_name = st.selectbox("换班申请人 (我)", STAFF, key="sn")
-        target = st.selectbox("换班目标人 (对方)", [s for s in STAFF if s != s_name])
+        s_name = st.selectbox("申请人 (我)", STAFF, key="sn")
+        target = st.selectbox("换班目标 (对方)", [s for s in STAFF if s != s_name])
         s_date = st.date_input("换班日期", value=now_beijing.date(), key="sd")
-        if st.form_submit_button("提交换班申请"):
+        if st.form_submit_button("提交全天换班"):
             new_id = int(db_full['id'].max()+1) if not db_full.empty else 1001
             save_data_to_gsheets({"id": new_id, "name": s_name, "type": "换班", "date": s_date, "start_t": "00:00:00", "end_t": "23:59:59", "hours": 0.0, "reason": f"与 {target} 换班", "status": "有效", "submit_time": now_beijing})
             st.rerun()
@@ -210,23 +215,26 @@ with tabs[1]:
         for i, d in enumerate(week):
             if d.month == t_month:
                 f_dt = get_final_duty(t_staff, d, db_full)
+                orig_dt = get_original_duty(t_staff, d)
                 is_today = "calendar-today" if d == now_beijing.date() else ""
                 with cols[i]:
-                    st.markdown(f"<div class='calendar-cell {is_today}'><div style='font-size:1.1em; font-weight:bold;'>{d.day}</div><div style='color:#004085; margin-top:5px; font-weight:bold;'>{'休' if f_dt=='休息' else f_dt}</div></div>", unsafe_allow_html=True)
+                    # 个人表逻辑：换班标记
+                    display_dt = f_dt
+                    if f_dt != orig_dt: display_dt = f"🔄{f_dt}"
+                    
+                    st.markdown(f"<div class='calendar-cell {is_today}'><div style='font-size:1.1em; font-weight:bold;'>{d.day}</div><div style='color:#004085; margin-top:5px; font-weight:bold;'>{'休' if f_dt=='休息' else display_dt}</div></div>", unsafe_allow_html=True)
                     if f_dt != "休息":
-                        if f_dt == "早班": l_t_str = "🍱 12:00"
-                        elif f_dt == "延迟班": l_t_str = "🍱 13:00"
-                        else: l_t_str = "🍱 无中午休"
-                        st.caption(l_t_str)
+                        l_t = "12:00" if f_dt == "早班" else "13:00" if f_dt == "延迟班" else "无"
+                        st.caption(f"🍱{l_t}")
                         if not db_v.empty:
                             day_l = db_v[(db_v['name']==t_staff) & (db_v['date']==d) & (db_v['type'] != "换班")]
                             for _, r in day_l.iterrows():
                                 st.markdown(f":{'red' if r['type']=='事假' else 'blue'}[{r['type']}]")
             else: cols[i].write("")
 
-# Tab 3: 周度全表
+# Tab 3: 周度全表 (新增换班溯源标注)
 with tabs[2]:
-    st.subheader("📅 周度班次与工时汇总")
+    st.subheader("📅 周度全表 (含换班记录溯源)")
     mon = now_beijing.date() - timedelta(days=now_beijing.weekday())
     w_dates = [mon + timedelta(days=i) for i in range(7)]
     w_res = []
@@ -235,21 +243,32 @@ with tabs[2]:
         row = {"姓名": name}; theoretical = 0.0; deduct = 0.0
         for d in w_dates:
             f_dt = get_final_duty(name, d, db_full)
+            orig_dt = get_original_duty(name, d)
             theoretical += FIXED_HOUR if f_dt != "休息" else 0.0
             l_h = db_v[(db_v['name']==name) & (db_v['date']==d) & (db_v['type']=="事假")]['hours'].sum()
             deduct += l_h
-            row[d.strftime("%m-%d\n%a")] = f"{f_dt}" + (f"\n(假:{round(l_h,1)}h)" if l_h > 0 else "")
+            
+            # --- 关键：换班前后差异标注 ---
+            if f_dt == orig_dt:
+                cell_txt = f"{f_dt}"
+            else:
+                # 换班了
+                cell_txt = f"🔄{f_dt}\n(原:{orig_dt})"
+            
+            if l_h > 0: cell_txt += f"\n(假:{round(l_h,1)}h)"
+            row[d.strftime("%m-%d\n%a")] = cell_txt
+            
         row["理论工时"] = f"{round(theoretical, 1)}h"; row["实到工时"] = f"{round(theoretical - deduct, 1)}h"
         w_res.append(row)
     st.dataframe(pd.DataFrame(w_res), use_container_width=True, hide_index=True)
     st.markdown("---")
-    st.markdown("##### 📝 班次定义说明\n- **早班**: 09:00-19:00 (午休 12:00-13:30)\n- **延迟班**: 10:00-20:00 (午休 13:00-14:30)\n- **晚值班**: 12:30-19:00(在司) + 20:00-22:00(居家)")
+    st.markdown("##### 📝 班次定义说明\n- **早班**: 09:00-19:00 (休 12:00-13:30)\n- **延迟班**: 10:00-20:00 (休 13:00-14:30)\n- **晚值班**: 12:30-19:00(在司) + 20:00-22:00(居家)")
 
 # Tab 4: 计薪汇总
 with tabs[3]:
     st.subheader("💰 月度计薪汇总")
-    m_y = st.selectbox("年份", [2026, 2027], key="salary_y")
-    m_m = st.selectbox("月份", range(1, 13), index=now_beijing.month-1, key="salary_m")
+    m_y = st.selectbox("年份 ", [2026, 2027], key="salary_y")
+    m_m = st.selectbox("月份 ", range(1, 13), index=now_beijing.month-1, key="salary_m")
     curr_m_days = calendar.monthrange(m_y, m_m)[1]
     m_days = [datetime(m_y, m_m, d).date() for d in range(1, curr_m_days + 1) if datetime(m_y, m_m, d).date() >= START_DATE]
     m_summary = []
@@ -262,8 +281,8 @@ with tabs[3]:
 
 # Tab 5: 管理记录
 with tabs[4]:
-    st.subheader("🔍 流水记录中心")
-    f_month = st.selectbox("查询月份", range(1, 13), index=now_beijing.month-1)
+    st.subheader("🔍 流水记录中心 (支持回撤)")
+    f_month = st.selectbox("查询月份 ", range(1, 13), index=now_beijing.month-1)
     if not db_full.empty:
         df_show = db_full.copy()
         df_show['month'] = pd.to_datetime(df_show['date']).dt.month
@@ -275,9 +294,12 @@ with tabs[4]:
             s_clr = "green" if r['status']=="有效" else "red"
             c2.markdown(f"{rec_icon} **{r['name']}** | {r['date']} | {r['type']} | {r['reason']}")
             if str(r['status']) == "有效":
-                if c3.button("撤回", key=f"rev_{r['id']}"):
+                if c3.button("撤回记录", key=f"rev_{r['id']}"):
                     withdraw_req(r['id'])
                     st.rerun()
+            else:
+                c3.write(":red[已撤回]")
             st.divider()
+    else: st.write("暂无记录")
 
 if st.button("🔄 同步云端数据"): st.rerun()
