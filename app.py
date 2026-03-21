@@ -12,7 +12,7 @@ china_tz = pytz.timezone('Asia/Shanghai')
 def get_now():
     return datetime.now(china_tz)
 
-st.set_page_config(page_title="客服考勤管理系统 v18.6", layout="wide", page_icon="⚖️")
+st.set_page_config(page_title="客服考勤管理系统 v18.7", layout="wide", page_icon="⚖️")
 
 # 界面风格锁定
 st.markdown("""
@@ -33,8 +33,8 @@ st.markdown("""
 
 # 核心常量
 START_DATE = datetime(2026, 3, 1).date()
-# 【关键更新】：根据要求调整了 陈君琳、都 娟、陈鹤舞 的排位顺序
-STAFF = ["郭战勇", "徐远远", "陈君琳", "都 娟", "陈鹤舞", "顾凌海"]
+# 【关键更新】：根据要求调整了 陈鹤舞 与 都 娟 的排位顺序
+STAFF = ["郭战勇", "徐远远", "陈君琳", "陈鹤舞", "都 娟", "顾凌海"]
 FIXED_HOUR = 8.5 
 
 # --- 2. 数据库逻辑 (Google Sheets) ---
@@ -148,7 +148,7 @@ def get_status_ui(name, name_idx, final_dtype, now_dt, db_df):
 now_beijing = get_now()
 db_full = load_db()
 
-st.title("🛡️ 客服部智能化管理系统 v18.6")
+st.title("🛡️ 客服部智能化管理系统 v18.7")
 
 with st.sidebar:
     st.header("📋 行政与换班申请")
@@ -212,12 +212,7 @@ with tabs[1]:
                 f_dt = get_final_duty(t_staff, d, db_full)
                 is_today = "calendar-today" if d == now_beijing.date() else ""
                 with cols[i]:
-                    st.markdown(f"""
-                        <div class="calendar-cell {is_today}">
-                            <div style='font-size:1.1em; font-weight:bold;'>{d.day}</div>
-                            <div style='color:#004085; margin-top:5px; font-weight:bold;'>{'休' if f_dt=='休息' else f_dt}</div>
-                        </div>
-                    """, unsafe_allow_html=True)
+                    st.markdown(f"<div class='calendar-cell {is_today}'><div style='font-size:1.1em; font-weight:bold;'>{d.day}</div><div style='color:#004085; margin-top:5px; font-weight:bold;'>{'休' if f_dt=='休息' else f_dt}</div></div>", unsafe_allow_html=True)
                     if f_dt != "休息":
                         if f_dt == "早班": l_t_str = "🍱 12:00"
                         elif f_dt == "延迟班": l_t_str = "🍱 13:00"
