@@ -12,7 +12,7 @@ china_tz = pytz.timezone('Asia/Shanghai')
 def get_now():
     return datetime.now(china_tz)
 
-st.set_page_config(page_title="客服考勤管理系统 v18.4", layout="wide", page_icon="⚖️")
+st.set_page_config(page_title="客服考勤管理系统 v18.6", layout="wide", page_icon="⚖️")
 
 # 界面风格锁定
 st.markdown("""
@@ -33,8 +33,8 @@ st.markdown("""
 
 # 核心常量
 START_DATE = datetime(2026, 3, 1).date()
-# 【关键更新】：调换了 陈鹤舞 和 都 娟 的顺序，以实现所有班次的自动调换
-STAFF = ["郭战勇", "徐远远", "都 娟", "陈鹤舞", "陈君琳", "顾凌海"]
+# 【关键更新】：根据要求调整了 陈君琳、都 娟、陈鹤舞 的排位顺序
+STAFF = ["郭战勇", "徐远远", "陈君琳", "都 娟", "陈鹤舞", "顾凌海"]
 FIXED_HOUR = 8.5 
 
 # --- 2. 数据库逻辑 (Google Sheets) ---
@@ -90,20 +90,19 @@ def get_original_duty(name, date_obj):
         if s not in ["郭战勇", "徐远远"] and weekday == 6: continue
         working_staff.append(s)
     
-    # 基于名单顺序的循环分配逻辑
     shift_offset = (days_diff + (days_diff // 7)) % len(working_staff)
     rotated_staff = working_staff[shift_offset:] + working_staff[:shift_offset]
     current_staff_pos = rotated_staff.index(name)
 
-    if weekday in [0, 1, 3, 4]: # 一二四五：2早, 2延, 2晚
+    if weekday in [0, 1, 3, 4]: # 2早, 2延, 2晚
         if current_staff_pos < 2: return "早班"
         elif current_staff_pos < 4: return "延迟班"
         else: return "晚值班"
-    elif weekday in [2, 5]: # 三六：2早, 1延, 2晚
+    elif weekday in [2, 5]: # 2早, 1延, 2晚
         if current_staff_pos < 2: return "早班"
         elif current_staff_pos < 3: return "延迟班"
         else: return "晚值班"
-    elif weekday == 6: # 日：1早, 1晚
+    elif weekday == 6: # 1早, 1晚
         if current_staff_pos < 1: return "早班"
         else: return "晚值班"
     return "早班"
@@ -149,7 +148,7 @@ def get_status_ui(name, name_idx, final_dtype, now_dt, db_df):
 now_beijing = get_now()
 db_full = load_db()
 
-st.title("🛡️ 客服部智能化管理系统 v18.4")
+st.title("🛡️ 客服部智能化管理系统 v18.6")
 
 with st.sidebar:
     st.header("📋 行政与换班申请")
@@ -205,7 +204,7 @@ with tabs[1]:
     weeks = cal.monthdatescalendar(t_year, t_month)
     db_v = db_full[db_full['status']=="有效"] if not db_full.empty else pd.DataFrame()
     header_cols = st.columns(7)
-    for idx, d_n in enumerate(["一","二","三","四","五","六","日"]): header_cols[idx].markdown(f"<center>周{d_n}</center>", unsafe_allow_html=True)
+    for idx, d_n in enumerate(["一","二","三","四","五","六","日"]): header_cols[idx].markdown(f"<center><b>周{d_n}</b></center>", unsafe_allow_html=True)
     for week in weeks:
         cols = st.columns(7)
         for i, d in enumerate(week):
@@ -213,7 +212,12 @@ with tabs[1]:
                 f_dt = get_final_duty(t_staff, d, db_full)
                 is_today = "calendar-today" if d == now_beijing.date() else ""
                 with cols[i]:
-                    st.markdown(f"<div class='calendar-cell {is_today}'><div style='font-size:1.1em; font-weight:bold;'>{d.day}</div><div style='color:#004085; margin-top:5px; font-weight:bold;'>{'休' if f_dt=='休息' else f_dt}</div></div>", unsafe_allow_html=True)
+                    st.markdown(f"""
+                        <div class="calendar-cell {is_today}">
+                            <div style='font-size:1.1em; font-weight:bold;'>{d.day}</div>
+                            <div style='color:#004085; margin-top:5px; font-weight:bold;'>{'休' if f_dt=='休息' else f_dt}</div>
+                        </div>
+                    """, unsafe_allow_html=True)
                     if f_dt != "休息":
                         if f_dt == "早班": l_t_str = "🍱 12:00"
                         elif f_dt == "延迟班": l_t_str = "🍱 13:00"
@@ -263,7 +267,7 @@ with tabs[3]:
 
 # Tab 5: 管理记录
 with tabs[4]:
-    st.subheader("🔍 流水流水记录中心")
+    st.subheader("🔍 流水记录中心")
     f_month = st.selectbox("查询月份", range(1, 13), index=now_beijing.month-1)
     if not db_full.empty:
         df_show = db_full.copy()
@@ -281,4 +285,4 @@ with tabs[4]:
                     st.rerun()
             st.divider()
 
-if st.button("🔄 刷新云端数据"): st.rerun()
+if st.button("🔄 同步云端数据"): st.rerun()
