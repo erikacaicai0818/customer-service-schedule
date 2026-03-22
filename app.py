@@ -11,7 +11,7 @@ china_tz = pytz.timezone('Asia/Shanghai')
 def get_now():
     return datetime.now(china_tz)
 
-st.set_page_config(page_title="客服考勤综合管理系统 v22.1", layout="wide", page_icon="⚖️")
+st.set_page_config(page_title="客服考勤综合管理系统 v22.2", layout="wide", page_icon="⚖️")
 
 # 界面风格锁定
 st.markdown("""
@@ -48,13 +48,7 @@ HOLIDAYS_2026 = {
 }
 
 # 班次工时定义
-SHIFT_HOURS_MAP = {
-    "早班": 8.5,
-    "延迟班": 8.5,
-    "晚值班": 8.5,
-    "值班晚班次": 3.0,
-    "休息": 0.0
-}
+SHIFT_HOURS_MAP = {"早班": 8.5, "延迟班": 8.5, "晚值班": 8.5, "值班晚班次": 3.0, "休息": 0.0}
 
 # 柠檬 & 电话接线角色配置
 LEMON_BACKUP_LIST = {0: ["顾凌海", "都 娟"], 1: ["郭战勇", "都 娟"], 2: ["陈鹤舞", "陈君琳"], 3: ["顾凌海", "陈君琳"], 4: ["郭战勇", "都 娟"], 5: ["顾凌海", "郭战勇"], 6: ["郭战勇"]}
@@ -70,7 +64,7 @@ BASE_DUTY_MAP = {
     "顾凌海": ["早班", "晚值班", "早班", "早班", "早班", "早班", "休息"]
 }
 
-# --- 2. 数据库逻辑 ---
+# --- 2. 数据库逻辑 (Google Sheets) ---
 conn = st.connection("gsheets", type=GSheetsConnection)
 
 def load_db():
@@ -103,16 +97,17 @@ def withdraw_req(req_id):
     for col in df.columns:
         if col not in ['hours', 'id']: df[col] = df[col].astype(str).replace(['nan', 'None', '<NA>', 'NaT'], '')
     conn.update(data=df)
+    st.success(f"ID: {req_id} 记录已撤回")
 
 # --- 3. 核心算法 ---
 def get_original_duty(name, date_obj):
     if date_obj < START_DATE: return "未开始"
-    if date_obj in HOLIDAYS_2026: return "休息" # 节假日默认休息
+    if date_obj in HOLIDAYS_2026: return "休息" 
     weekday = date_obj.weekday()
     return BASE_DUTY_MAP.get(name, ["休息"]*7)[weekday]
 
 def get_duty_after_holiday_app(name, date_obj, db_df):
-    """换班辅助逻辑"""
+    """判定经过节假日值班排班后的班次（过滤无效记录）"""
     duty = get_original_duty(name, date_obj)
     if not db_df.empty:
         holiday_duties = db_df[(db_df['date'] == date_obj) & (db_df['type'] == "节假日值班") & (db_df['status'] == "有效")]
@@ -121,13 +116,12 @@ def get_duty_after_holiday_app(name, date_obj, db_df):
     return duty
 
 def get_final_duty(name, date_obj, db_df):
+    """最终班次：原始 -> 节假日安排 -> 换班"""
     duty = get_original_duty(name, date_obj)
     if db_df.empty: return duty
-    # A. 节假日值班覆盖
-    holiday_duties = db_df[(db_df['date'] == date_obj) & (db_df['type'] == "节假日值班") & (db_df['status'] == "有效")]
-    if not holiday_duties[holiday_duties['name'] == name].empty:
-        duty = holiday_duties[holiday_duties['name'] == name].iloc[0]['reason']
-    # B. 换班覆盖
+    # A. 应用节假日值班 (必须状态为有效)
+    duty = get_duty_after_holiday_app(name, date_obj, db_df)
+    # B. 应用换班
     swaps = db_df[(db_df['date'] == date_obj) & (db_df['type'] == "换班") & (db_df['status'] == "有效")]
     for _, row in swaps.iterrows():
         target = str(row['reason']).replace("与", "").replace("换班", "").strip()
@@ -138,7 +132,7 @@ def get_final_duty(name, date_obj, db_df):
 def get_status_ui(name, final_dtype, now_dt, db_df):
     now_t, now_d = now_dt.time(), now_dt.date()
     if not db_df.empty:
-        # 【修复关键点】：使用 ~Series.isin() 代替 not in
+        # 排除换班和节假日值班，查找行政请假状态
         active = db_df[(db_df['name']==name) & (db_df['date']==now_d) & (db_df['status']=="有效") & (~db_df['type'].isin(["换班", "节假日值班"]))]
         for _, r in active.iterrows():
             try:
@@ -168,35 +162,35 @@ def get_status_ui(name, final_dtype, now_dt, db_df):
 now_beijing = get_now()
 db_full = load_db()
 
-st.title("🛡️ 客服综合管理系统 v22.1")
+st.title("🛡️ 客服综合管理系统 v22.2")
 
 with st.sidebar:
-    st.header("📋 行政与换班申请")
+    st.header("📋 考勤与换班申请")
     with st.form("leave_form", clear_on_submit=True):
         l_name = st.selectbox("人员姓名", STAFF, key="ln")
-        l_type = st.radio("类型", ["事假", "病假", "调休"], horizontal=True)
-        l_date = st.date_input("日期", value=now_beijing.date(), key="ld_v221")
+        l_type = st.radio("请假类型", ["事假", "病假", "调休"], horizontal=True)
+        l_date = st.date_input("日期", value=now_beijing.date(), key="ld_apply")
         c1, c2 = st.columns(2)
         l_t1, l_t2 = c1.time_input("开始", value=time(9,0)), c2.time_input("结束", value=time(18,0))
-        l_reason = st.text_input("备注事由")
+        l_reason = st.text_input("备注信息")
         if st.form_submit_button("提交行政申请"):
             h = round((datetime.combine(l_date, l_t2) - datetime.combine(l_date, l_t1)).total_seconds()/3600, 1)
             save_data_to_gsheets({"id": 0, "name": l_name, "type": l_type, "date": l_date, "start_t": l_t1, "end_t": l_t2, "hours": h, "reason": l_reason, "status": "有效", "submit_time": now_beijing})
             st.rerun()
 
     with st.form("swap_form", clear_on_submit=True):
-        s_name, target = st.selectbox("申请人", STAFF), st.selectbox("对方", [s for s in STAFF])
+        s_name, target = st.selectbox("申请人", STAFF), st.selectbox("对方", STAFF)
         s_date = st.date_input("换班日期", value=now_beijing.date())
-        if st.form_submit_button("确认换班"):
+        if st.form_submit_button("确认全天换班"):
             save_data_to_gsheets({"id": 0, "name": s_name, "type": "换班", "date": s_date, "start_t": "00:00:00", "end_t": "00:00:00", "hours": 0.0, "reason": f"与 {target} 换班", "status": "有效", "submit_time": now_beijing})
             st.rerun()
 
     st.header("🏮 节假日值班安排")
     with st.form("holiday_form", clear_on_submit=True):
-        h_name = st.selectbox("值班人员", STAFF)
-        h_date = st.selectbox("法定假日", list(HOLIDAYS_2026.keys()), format_func=lambda x: f"{x} ({HOLIDAYS_2026[x]})")
+        h_name = st.selectbox("值班客服", STAFF)
+        h_date = st.selectbox("选择法定假日", list(HOLIDAYS_2026.keys()), format_func=lambda x: f"{x} ({HOLIDAYS_2026[x]})")
         h_shift = st.selectbox("分配班次", ["早班", "延迟班", "晚值班", "值班晚班次"])
-        if st.form_submit_button("确认节假日值班"):
+        if st.form_submit_button("确认节日值班安排"):
             save_data_to_gsheets({"id": 0, "name": h_name, "type": "节假日值班", "date": h_date, "start_t": "00:00:00", "end_t": "00:00:00", "hours": SHIFT_HOURS_MAP[h_shift], "reason": h_shift, "status": "有效", "submit_time": now_beijing})
             st.rerun()
 
@@ -205,7 +199,7 @@ tabs = st.tabs(["🟢 实时监控", "👤 个人月度表", "📅 周度全表"
 # Tab 1
 with tabs[0]:
     t_h = HOLIDAYS_2026.get(now_beijing.date())
-    st.subheader(f"⏱️ 状态看板 ({now_beijing.strftime('%H:%M:%S')}{' | 🏮 '+t_h if t_h else ''})")
+    st.subheader(f"⏱️ 实时监控 ({now_beijing.strftime('%H:%M:%S')}{' | 🏮 '+t_h if t_h else ''})")
     cols = st.columns(6)
     for i, name in enumerate(STAFF):
         f_dt = get_final_duty(name, now_beijing.date(), db_full)
@@ -220,9 +214,9 @@ with tabs[0]:
 
 # Tab 2
 with tabs[1]:
-    st.subheader("👤 个人出勤日历")
+    st.subheader("👤 客服个人日历")
     i1, i2, i3 = st.columns(3)
-    t_s, t_y, t_m = i1.selectbox("查看人员", STAFF), i2.selectbox("年份 ", [2026, 2027]), i3.selectbox("月份 ", range(1, 13), index=now_beijing.month-1)
+    t_s, t_y, t_m = i1.selectbox("查看人员", STAFF, key="ind_s"), i2.selectbox("年份 ", [2026, 2027], key="ind_y"), i3.selectbox("月份 ", range(1, 13), index=now_beijing.month-1, key="ind_m")
     weeks = calendar.Calendar(firstweekday=0).monthdatescalendar(t_y, t_m)
     db_v = db_full[db_full['status']=="有效"] if not db_full.empty else pd.DataFrame()
     h_cols = st.columns(7)
@@ -250,9 +244,9 @@ with tabs[1]:
 
 # Tab 3
 with tabs[2]:
-    st.subheader("📅 周度排班追踪")
+    st.subheader("📅 周度排班追踪看板")
     cw1, cw2 = st.columns(2)
-    s_m = cw1.selectbox("月份筛选", range(1, 13), index=now_beijing.month-1, key="wm_221")
+    s_m = cw1.selectbox("筛选月份", range(1, 13), index=now_beijing.month-1, key="wm_222")
     _, d_cnt = calendar.monthrange(2026, s_m); m_dates = [date(2026, s_m, d) for d in range(1, d_cnt + 1)]
     w_list, temp_w = [], []
     for d in m_dates:
@@ -286,8 +280,8 @@ with tabs[2]:
 
 # Tab 4
 with tabs[3]:
-    st.subheader("💰 月度计薪汇总")
-    m_y, m_m = st.selectbox("年份汇总", [2026, 2027], key="sy221"), st.selectbox("月份汇总", range(1, 13), index=now_beijing.month-1, key="sm221")
+    st.subheader("💰 月度考勤汇总汇总")
+    m_y, m_m = st.selectbox("年份 ", [2026, 2027], key="sy222"), st.selectbox("月份 ", range(1, 13), index=now_beijing.month-1, key="sm222")
     m_days = [date(m_y, m_m, d) for d in range(1, calendar.monthrange(m_y, m_m)[1] + 1) if date(m_y, m_m, d) >= START_DATE]
     m_sum = []
     db_v = db_full[db_full['status']=="有效"] if not db_full.empty else pd.DataFrame()
@@ -296,13 +290,13 @@ with tabs[3]:
         h_wd = [d for d in act_wd if d in HOLIDAYS_2026]
         std = sum([SHIFT_HOURS_MAP.get(get_final_duty(name, d, db_v), 0.0) for d in m_days])
         pers = round(db_v[(db_v['name']==name) & (pd.to_datetime(db_v['date']).dt.month==m_m) & (db_v['type']=="事假")]['hours'].sum(), 1)
-        m_sum.append({"姓名": name, "实到天数": len(act_wd), "法定假值班": f"🏮 {len(h_wd)} 天", "理论工时": f"{round(std,1)}h", "事假扣除": f"-{pers}h", "应发计薪工时": f"{round(max(0.0, std - pers),1)}h"})
+        m_sum.append({"姓名": name, "实到天数": len(act_wd), "法定假值班": f"🏮 {len(h_wd)} 天", "理论工时": f"{round(std,1)}h", "事假扣除": f"-{pers}h", "计薪工时": f"{round(max(0.0, std - pers),1)}h"})
     st.table(pd.DataFrame(m_sum))
 
 # Tab 5
 with tabs[4]:
-    st.subheader("🔍 流水管理 (含换班/节假日值班回撤)")
-    f_m = st.selectbox("流水月份", range(1, 13), index=now_beijing.month-1)
+    st.subheader("🔍 流水记录回撤管理")
+    f_m = st.selectbox("查看月份", range(1, 13), index=now_beijing.month-1, key="fm_222")
     if not db_full.empty:
         df_s = db_full.copy(); df_s['month'] = pd.to_datetime(df_s['date']).dt.month
         df_s = df_s[df_s['month'] == f_m].sort_values("date", ascending=False)
@@ -312,7 +306,8 @@ with tabs[4]:
             icon = "🔄" if r['type']=="换班" else "🏮" if r['type']=="节假日值班" else "📝"
             s_clr = "green" if r['status']=="有效" else "red"
             c2.markdown(f"{icon} **{r['name']}** | {r['date']} | {r['type']} | {r['reason']}")
-            if str(r['status']) == "有效" and c3.button("撤回", key=f"rev_{r['id']}"): withdraw_req(r['id']); st.rerun()
+            if str(r['status']) == "有效" and c3.button("撤回记录", key=f"rev_{r['id']}"): 
+                withdraw_req(r['id']); st.rerun()
             st.divider()
 
-if st.button("🔄 同步数据"): st.rerun()
+if st.button("🔄 全局同步数据"): st.rerun()
